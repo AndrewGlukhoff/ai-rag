@@ -1,0 +1,23 @@
+# logs and tmp
+data/raw/
+data/tmp/
+data/*.csv
+logs/
+*.log
+
+# legacy code
+archive/
+
+# Python cache, local db, models (if any), etc..
+__pycache__/
+chroma_db/
+models/
+.vscode
+*.pyc
+
+# confidential
+*.env
+
+nohup.out
+requirements-full.txt
+query_test.py
