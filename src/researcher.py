@@ -2,21 +2,12 @@ import os
 from langchain_ollama import OllamaLLM
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from config import CHROMA_PATH, EMBED_MODEL, STRICT_ORDER
+from config import CHROMA_PATH, EMBED_MODEL, STRICT_ORDER, RAG_PROMPT_TEMPLATE, LLM_CONFIG
 import time
 
 # 1. Подключаемся к Ollama (модель из ~/.ollama/)
 print("🧠 Подключение к Ollama Llama-3...")
-llm = OllamaLLM(
-    model="llama3",
-    model_kwargs={
-        "temperature": 0.4,
-        "repeat_penalty": 1.8, # as repetition_penalty
-        "top_p": 0.5,
-        "num_predict": 300, # as max_tokens (уменьшил ответ для быстроты)
-        "num_ctx": 4096, # context window for books chunks (2048 default)
-    }
-)
+llm = OllamaLLM(**LLM_CONFIG)
 
 # 2. Инициализируем поиск по твоим 7 книгам
 embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
@@ -53,26 +44,7 @@ def ask_expert(question, user_choice="LLM set"):
     # GENERATION
     context = "\n\n".join([d.page_content for d in docs])
     
-    # Формируем строгий промпт для RAG - пробовал сделать короче - быстрее, но хуже по качеству
-    # prompt = f"Using this context: {context}\n\nQuestion: {question}\n\nAnswer in Russian:"
-
-    prompt = f"""
-    ### ИНСТРУКЦИЯ ДЛЯ ТЕХНИЧЕСКОГО ЭКСПЕРТА ###
-    Ты — ведущий исследователь ИИ. Твоя задача: на основе предоставленных отрывков из технической литературы (на английском) составить ГЛУБОКИЙ и ПОДРОБНЫЙ ответ на русском языке.
-
-    ПРАВИЛА:
-    1. Используй профессиональную терминологию (LLM, токены, контекстное окно, веса).
-    2. Не давай общих определений, если в тексте есть конкретика (авторы, методы, примеры).
-    3. Сгруппируй информацию логически: определение, методология, важность.
-    4. Отвечай только на основе предоставленного ТЕКСТА.
-
-    КОНТЕКСТ (из твоей библиотеки):
-    {context}
-
-    ВОПРОС: {question}
-
-    ПОДРОБНЫЙ ОТВЕТ НА РУССКОМ:
-"""
+    prompt = RAG_PROMPT_TEMPLATE.format(context=context, question=question)
 
     # Генерируем ответ через Ollama    
     print("\n🎓 ОТВЕТ АССИСТЕНТА-ИССЛЕДОВАТЕЛЯ:")
