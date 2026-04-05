@@ -105,11 +105,13 @@
                 chat.scrollTop = chat.scrollHeight; // Auto-scroll
             }
         }
-        function clearChat() {
+        async function clearChat() {
             // Просто обнуляем содержимое контейнера чата
             document.getElementById('chat').innerHTML = '';
-            // И чистим статус, если он завис
-            document.getElementById('status-msg').innerText = '';
+            // Чистим память на сервере (FastAPI)
+            await fetch('http://127.0.0', { method: 'POST' });
+            
+            console.log("Memory and UI cleared");
         }
     </script>
 </body>
