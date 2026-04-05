@@ -36,6 +36,32 @@
             color: #888;
             margin-left: 10px;
         }
+
+        /* Styling the Thought block */
+        .bot { 
+            white-space: pre-wrap; /* Это сохранит переносы строк без <br> */
+            word-wrap: break-word;
+        }
+        .thought-block {
+            display: block;
+            background: #f0f4f8;
+            border-left: 4px solid #007aff;
+            margin: 10px 0;
+            padding: 12px;
+            font-style: italic;
+            color: #444;
+            border-radius: 4px;
+        }
+
+        /* This adds the header back automatically! */
+        .thought-block::before { 
+            content: "🤔 Рассуждение:"; 
+            display: block; 
+            font-weight: bold; 
+            font-style: normal; 
+            margin-bottom: 5px; 
+            color: #007aff;
+        }
     </style>
 </head>
 <body>
@@ -53,6 +79,9 @@
         <div id="spinner"></div>
         <span id="status-msg"></span>
         <button onclick="clearChat()" style="background: #ff3b30;">Clear</button>
+        <label style="font-size: 0.8em; color: #666;">
+        <input type="checkbox" id="deep-think"> Deep Think (CoT)</label>
+
     </div>
 
     <script>
@@ -79,10 +108,11 @@
             chat.appendChild(botMsg);
 
             // POST to FastAPI
+            const isDeepThink = document.getElementById('deep-think').checked;
             const response = await fetch('http://127.0.0.1:8000/ask', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question: query, level: level })
+                body: JSON.stringify({ question: query, level: level, deep_think: isDeepThink })
             });
 
             // READ THE STREAM
@@ -90,19 +120,39 @@
             const decoder = new TextDecoder();
 
             let isFirstToken = true;
+            
+            // We use a simple trick: replace <thought> tags with our custom <thought> element
+            let rawText = "";
 
             while (true) {
                 const { value, done } = await reader.read();
                 if (done) break;
-
+                
+                // turn off spinner
                 if (isFirstToken) {
                     spinner.style.display = 'none';
                     status.innerText = '';
                     isFirstToken = false;
                 }
+                
+                // DECODE and STACK the text
+                rawText += decoder.decode(value);
 
-                botMsg.innerText += decoder.decode(value);
-                chat.scrollTop = chat.scrollHeight; // Auto-scroll
+                let processedText = rawText;
+
+                // ХАК: Если модель забыла закрыть </thought>, но уже начала писать "ОТВЕТ"
+                if (processedText.includes("###") && !processedText.includes("</thought>")) {
+                    processedText = processedText.replace("###", "</thought>###");
+                }
+
+                let styledText = processedText
+                    .replace(/<thought>/g, '<div class="thought-block">')
+                    .replace(/<\/thought>/g, '</div>')
+                    .replace(/\n/g, '<br>');
+
+                botMsg.innerHTML = styledText;
+
+                chat.scrollTop = chat.scrollHeight;
             }
         }
         async function clearChat() {

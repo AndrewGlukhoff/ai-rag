@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 import os
 import time
 from config import (CHROMA_PATH, EMBED_MODEL, STRICT_ORDER, 
-                    RAG_PROMPT_TEMPLATE, LLM_CONFIG)
+                    RAG_PROMPT_BASIC, LLM_CONFIG, RAG_PROMPT_COT)
 from langchain_core.messages import HumanMessage, AIMessage
 
 chat_history = [] # простейшее хранилище 
@@ -43,7 +43,8 @@ llm = OllamaLLM(**LLM_CONFIG)
 # Модель данных для запроса
 class QuestionRequest(BaseModel):
     question: str
-    level: str = "LLM set" # бывший user_choice
+    level: str = "LLM set" 
+    deep_think: bool = False
 
 
 @app.get("/ui", response_class=HTMLResponse)
@@ -72,7 +73,7 @@ async def ask_expert(request: QuestionRequest):
     # Поиск контекста
     docs = db.similarity_search(
         request.question, 
-        k=3, 
+        k=7, # увеличил чтобы попало больше книжек для сравнения
         filter={"category_set": {"$in": allowed_sets}}
     )
     search_duration = time.time() - start_search
@@ -84,19 +85,43 @@ async def ask_expert(request: QuestionRequest):
     # Берем последние 6 сообщений, чтобы не перегружать контекстное окно (num_ctx)
     history_context = chat_history[-6:]
 
-    # 3. Обновляем промпт (добавляем блок истории)
+    # Обновляем промпт (добавляем блок истории)
     formatted_history = ""
     for msg in history_context:
         prefix = "User" if isinstance(msg, HumanMessage) else "Assistant"
         formatted_history += f"{prefix}: {msg.content}\n"
 
+
+    # Choose the prompt based on the checkbox
+    instruction = RAG_PROMPT_COT if request.deep_think else RAG_PROMPT_BASIC
+    
     prompt = f"""
-    {RAG_PROMPT_TEMPLATE.format(context=context, question=request.question)}
-    
-    PREVIOUS CONVERSATION:
+    SYSTEM: Ты — строгий технический аудитор. Твоя задача — проверять факты. 
+    ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ.
+
+    ИСТОРИЯ ДИАЛОГА (Context Memory):
     {formatted_history}
-    """
-    
+
+    КОНТЕКСТ ИЗ КНИГ (ТВОЙ ЕДИНСТВЕННЫЙ ИСТОЧНИК):
+    {context}
+
+    ЗАДАЧА:
+    {instruction}
+
+    ВОПРОС: {request.question}
+
+    ОБЯЗАТЕЛЬНО: 
+    1. Начни с <thought>
+    2. Внутри <thought> пиши ТОЛЬКО на русском.
+    3. Закрой блок тегом </thought>
+    4. После этого напиши заголовок ### ИТОГОВЫЙ ОТВЕТ ### и сам ответ ТОЛЬКО на русском.
+
+    ВНИМАНИЕ: Если в КОНТЕКСТЕ выше нет упоминания конкретных терминов из вопроса, 
+    ты ОБЯЗАН написать в <thought>, что информации нет, и не выдумывать ответ.
+
+    НАЧИНАЙ ОТВЕТ С ТЕГА <thought> НА РУССКОМ:
+    <thought>
+"""
 
     # Функция-генератор для стриминга
     def generate_tokens():
@@ -111,7 +136,7 @@ async def ask_expert(request: QuestionRequest):
             full_response += chunk
             yield chunk
 
-        # После завершения генерации сохраняем пару в историю
+        # Сохраняем в историю ТОЛЬКО чистый ответ модели
         chat_history.append(HumanMessage(content=request.question))
         chat_history.append(AIMessage(content=full_response))
 
@@ -119,12 +144,13 @@ async def ask_expert(request: QuestionRequest):
         total_duration = time.time() - start_total
 
         # статистика/источники
-        yield "\n\n---\n"
-        yield f"📊 M1: Search: {search_duration:.2f}s | First: {first_token_time:.2f}s | Gen: {gen_duraction:.2f}s Total: {total_duration:.2f}s\n"
-        yield f"🧠 History: {len(chat_history)} messages | Memory: Active\n"
-        yield "📚 ИСТОЧНИКИ:\n"
-        for s in sources:
-            yield f"• {s}\n"
+        stats_block = (# TODO History ?
+            f"\n\n---\n"
+            f"📊 M1: Search: {search_duration:.2f}s | First: {first_token_time:.2f}s | Gen: {gen_duraction:.2f}s Total: {total_duration:.2f}s\n"
+            f"🧠 History: {len(chat_history)} messages | Memory: Active\n"
+            f"📚 ИСТОЧНИКИ:\n" + "\n".join([f"• {s}" for s in sources])
+        )
+        yield stats_block
 
     return StreamingResponse(generate_tokens(), media_type="text/plain")
 

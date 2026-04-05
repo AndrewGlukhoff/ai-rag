@@ -2,7 +2,7 @@ import os
 from langchain_ollama import OllamaLLM
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from config import CHROMA_PATH, EMBED_MODEL, STRICT_ORDER, RAG_PROMPT_TEMPLATE, LLM_CONFIG
+from config import CHROMA_PATH, EMBED_MODEL, STRICT_ORDER, RAG_PROMPT_BASIC, LLM_CONFIG
 import time
 
 # 1. Подключаемся к Ollama (модель из ~/.ollama/)
@@ -44,7 +44,7 @@ def ask_expert(question, user_choice="LLM set"):
     # GENERATION
     context = "\n\n".join([d.page_content for d in docs])
     
-    prompt = RAG_PROMPT_TEMPLATE.format(context=context, question=question)
+    prompt = RAG_PROMPT_BASIC.format(context=context, question=question)
 
     # Генерируем ответ через Ollama    
     print("\n🎓 ОТВЕТ АССИСТЕНТА-ИССЛЕДОВАТЕЛЯ:")
