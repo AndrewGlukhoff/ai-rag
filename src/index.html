@@ -42,25 +42,16 @@
             white-space: pre-wrap; /* Это сохранит переносы строк без <br> */
             word-wrap: break-word;
         }
+        /* This will catch ANY div with the thought-block class */
         .thought-block {
             display: block;
-            background: #f0f4f8;
-            border-left: 4px solid #007aff;
-            margin: 10px 0;
-            padding: 12px;
+            background: #f0f4f8 !important;
+            border-left: 5px solid #007aff !important;
+            padding: 15px !important;
+            margin: 15px 0 !important;
             font-style: italic;
-            color: #444;
-            border-radius: 4px;
-        }
-
-        /* This adds the header back automatically! */
-        .thought-block::before { 
-            content: "🤔 Рассуждение:"; 
-            display: block; 
-            font-weight: bold; 
-            font-style: normal; 
-            margin-bottom: 5px; 
-            color: #007aff;
+            color: #2c3e50;
+            border-radius: 6px;
         }
     </style>
 </head>
@@ -120,9 +111,7 @@
             const decoder = new TextDecoder();
 
             let isFirstToken = true;
-            
-            // We use a simple trick: replace <thought> tags with our custom <thought> element
-            let rawText = "";
+            let rawText = isDeepThink ? "<thought>" : ""; 
 
             while (true) {
                 const { value, done } = await reader.read();
@@ -135,33 +124,36 @@
                     isFirstToken = false;
                 }
                 
-                // DECODE and STACK the text
                 rawText += decoder.decode(value);
 
-                let processedText = rawText;
-
-                // ХАК: Если модель забыла закрыть </thought>, но уже начала писать "ОТВЕТ"
-                if (processedText.includes("###") && !processedText.includes("</thought>")) {
-                    processedText = processedText.replace("###", "</thought>###");
+                let finalText = rawText;
+                if (finalText.includes("###") && !finalText.includes("</thought>")) {
+                    finalText = finalText.replace("###", "</thought>###");
                 }
 
-                let styledText = processedText
+                // 3. Форматируем финальный текст (используем finalText!)
+                let styledText = finalText
                     .replace(/<thought>/g, '<div class="thought-block">')
                     .replace(/<\/thought>/g, '</div>')
+                    .replace(/### ИТОГОВЫЙ ОТВЕТ ###/g, '<h3>Итоговый ответ:</h3>')
                     .replace(/\n/g, '<br>');
 
                 botMsg.innerHTML = styledText;
-
                 chat.scrollTop = chat.scrollHeight;
             }
         }
         async function clearChat() {
-            // Просто обнуляем содержимое контейнера чата
             document.getElementById('chat').innerHTML = '';
-            // Чистим память на сервере (FastAPI)
-            await fetch('http://127.0.0', { method: 'POST' });
+            document.getElementById('status-msg').innerText = 'Memory cleared';
             
-            console.log("Memory and UI cleared");
+            // Чистим память на сервере (FastAPI)
+            try {
+                    await fetch('/clear', { method: 'POST' }); 
+                    console.log("Backend memory cleared");
+            } catch (err) {
+                    console.error("Failed to clear backend memory", err);
+            }
+            
         }
     </script>
 </body>

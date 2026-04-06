@@ -13,6 +13,8 @@ from config import (CHROMA_PATH, EMBED_MODEL, STRICT_ORDER,
                     RAG_PROMPT_BASIC, LLM_CONFIG, RAG_PROMPT_COT)
 from langchain_core.messages import HumanMessage, AIMessage
 import re
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+
 
 chat_history = [] # простейшее хранилище 
 
@@ -72,33 +74,38 @@ async def ask_expert(request: QuestionRequest):
 
 
     # Автоматически находим нужные файлы по фамилиям в вопросе
-    matched_sources = get_automatic_filters(request.question)
+    matched_sources = get_automatic_filters(request.question, chat_history)
     
     base_filter = {"category_set": {"$in": allowed_sets}}
     
     if matched_sources:
-        # ПРОВЕРКА: Если источников несколько, используем $or внутри $and
-        # Но сначала убедись, что matched_sources - это список полных имен из UNIQUE_SOURCES
+        print(f"🎯 SURGICAL STRIKE: Найдено совпадений: {len(matched_sources)}")
+        print(f"📋 Источники: {matched_sources}")
+
         source_filters = [{"source": {"$eq": s}} for s in matched_sources]
-        
-        chroma_filter = {
-            "$and": [
-                {"category_set": {"$in": allowed_sets}},
-                {"$or": source_filters}
-            ]
-        }
-        print(f"🎯 Surgical Strike on: {matched_sources}")
+        if len(source_filters) == 1:
+            chroma_filter = {
+                "$and": [
+                    base_filter,
+                    source_filters[0] # Use the single expression directly
+                ]
+            }
+        else: 
+            chroma_filter = {
+                "$and": [
+                    base_filter,
+                    {"$or": source_filters}
+                ]
+            }
     else:
-        chroma_filter = {"category_set": {"$in": allowed_sets}}
+        print("🔍 ОБЩИЙ ПОИСК: Совпадений по авторам не найдено.")
+        chroma_filter = base_filter
 
-
-    print(f"DEBUG: Final Filter: {chroma_filter}")
 
     start_search = time.time()
-    # Поиск контекста
     docs = db.similarity_search(
         request.question, 
-        k=10, # увеличил чтобы попало больше книжек для сравнения
+        k=7, # увеличил чтобы попало больше книжек для сравнения
         filter=chroma_filter
     )
     search_duration = time.time() - start_search
@@ -124,43 +131,45 @@ async def ask_expert(request: QuestionRequest):
     # Берем последние 6 сообщений, чтобы не перегружать контекстное окно (num_ctx)
     history_context = chat_history[-6:]
 
-    # Обновляем промпт (добавляем блок истории)
-    formatted_history = ""
-    for msg in history_context:
-        prefix = "User" if isinstance(msg, HumanMessage) else "Assistant"
-        formatted_history += f"{prefix}: {msg.content}\n"
+    # # Обновляем промпт (добавляем блок истории)
+    # formatted_history = ""
+    # for msg in history_context:
+    #     prefix = "User" if isinstance(msg, HumanMessage) else "Assistant"
+    #     formatted_history += f"{prefix}: {msg.content}\n"
 
 
     # Choose the prompt based on the checkbox
     instruction = RAG_PROMPT_COT if request.deep_think else RAG_PROMPT_BASIC
     
-    prompt = f"""
-    SYSTEM: Ты — строгий технический аудитор. Твоя задача — проверять факты. 
-    ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ.
+#     prompt = f"""
+#     SYSTEM: Ты — РУССКОЯЗЫЧНЫЙ ИССЛЕДОВАТЕЛЬ ИИ. Твой единственный источник — предоставленный КОНТЕКСТ. 
+#     ЗАПРЕЩЕНО ИСПОЛЬЗОВАТЬ АНГЛИЙСКИЙ ЯЗЫК ДЛЯ РАССУЖДЕНИЙ.
 
-    ИСТОРИЯ ДИАЛОГА (Context Memory):
-    {formatted_history}
+#     ИСТОРИЯ ДИАЛОГА:
+#     {formatted_history}
 
-    КОНТЕКСТ ИЗ КНИГ (ТВОЙ ЕДИНСТВЕННЫЙ ИСТОЧНИК):
-    {context}
+#     КОНТЕКСТ ИЗ КНИГ:
+#     {context}
+   
+#     ЗАДАЧА: 
+#     {instruction}
 
-    ЗАДАЧА:
-    {instruction}
+#     ВОПРОС: {request.question}
 
-    ВОПРОС: {request.question}
+#     ОБЯЗАТЕЛЬНО НАЧНИ С ТЕГА <thought> И ПИШИ ТОЛЬКО ПО-РУССКИ:
+# """
+    # if request.deep_think:
+    #     prompt += "<thought>"
 
-    ОБЯЗАТЕЛЬНО: 
-    1. Начни с <thought>
-    2. Внутри <thought> пиши ТОЛЬКО на русском.
-    3. Закрой блок тегом </thought>
-    4. После этого напиши заголовок ### ИТОГОВЫЙ ОТВЕТ ### и сам ответ ТОЛЬКО на русском.
+    messages = [SystemMessage(content=f"{instruction}\nОТВЕЧАЙ ТОЛЬКО НА РУССКОМ.")]
+    
+    messages.extend(chat_history[-6:])
+    
+    current_user_content = f"КОНТЕКСТ ИЗ КНИГ:\n{context}\n\nВОПРОС: {request.question}"
+    messages.append(HumanMessage(content=current_user_content))
 
-    ВНИМАНИЕ: Если в КОНТЕКСТЕ выше нет упоминания конкретных терминов из вопроса, 
-    ты ОБЯЗАН написать в <thought>, что информации нет, и не выдумывать ответ.
-
-    НАЧИНАЙ ОТВЕТ С ТЕГА <thought> НА РУССКОМ:
-    <thought>
-"""
+    if request.deep_think:
+        messages.append(AIMessage(content="<thought>"))
 
     # Функция-генератор для стриминга
     def generate_tokens():
@@ -169,7 +178,7 @@ async def ask_expert(request: QuestionRequest):
         full_response = "" # Собираем ответ, чтобы положить в историю
 
         # response 
-        for chunk in llm.stream(prompt):
+        for chunk in llm.stream(messages):
             if first_token_time is None:
                 first_token_time = time.time() - start_gen
             full_response += chunk
@@ -183,7 +192,7 @@ async def ask_expert(request: QuestionRequest):
         total_duration = time.time() - start_total
 
         # статистика/источники
-        stats_block = (# TODO History ?
+        stats_block = (
             f"\n\n---\n"
             f"📊 M1: Search: {search_duration:.2f}s | First: {first_token_time:.2f}s | Gen: {gen_duraction:.2f}s Total: {total_duration:.2f}s\n"
             f"🧠 History: {len(chat_history)} messages | Memory: Active\n"
@@ -198,7 +207,8 @@ async def ask_expert(request: QuestionRequest):
 async def clear_memory():
     global chat_history
     chat_history = []
-    return {"status": "Memory cleared"}
+    print("🧹 Chat history has been wiped cleaner than a whistle!")
+    return {"status": "success", "message": "Memory cleared"}
 
 
 # Глобальный список всех файлов в базе
@@ -235,24 +245,26 @@ async def startup_event():
 
 import re
 
-def get_automatic_filters(user_query: str):
+def get_automatic_filters(user_query: str, history: list):
     query_lower = user_query.lower()
+    print(f"DEBUG: len(history): {len(history)}")
+    for msg in history[-2:]:
+        query_lower += " " + msg.content.lower()
     
-    # We use a set to avoid duplicates
     matched = set()
-    
+    # TODO вместо этого фильтра сделать новый ingest с отдельно authors
+    STOP_WORDS = {"engineering", "machine", "learning", "artificial", "intelligence", "large", "language", "prompt"} 
     for source in UNIQUE_SOURCES:
-        # 1. Clean the filename: "Prompt Engineering - John Berryman.epub" -> "john berryman"
-        # We remove extensions and common separator characters
         clean_name = re.sub(r'\.(epub|pdf|pdf_txt)$', '', source, flags=re.IGNORECASE)
         name_parts = re.split(r'[-_\s\.]', clean_name.lower())
         
-        # 2. Check for specific keywords (Surnames/Unique words)
-        # We ignore short common words like 'the', 'and', 'with'
         for part in name_parts:
-            if len(part) > 4 and part in query_lower:
+            # Ищем фамилии (длиной > 4) в вопросе ИЛИ в истории
+            if len(part) > 4 and part in query_lower and part not in STOP_WORDS:
+                print(f"DEBUG: part: {part}, name_parts: {name_parts}")
+                print(f"DEBUG: query_lower: {query_lower}")
                 matched.add(source)
-                break # Move to next book once we find one match
+                break 
                 
     return list(matched)
 
