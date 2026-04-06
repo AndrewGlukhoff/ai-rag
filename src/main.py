@@ -12,6 +12,7 @@ import time
 from config import (CHROMA_PATH, EMBED_MODEL, STRICT_ORDER, 
                     RAG_PROMPT_BASIC, LLM_CONFIG, RAG_PROMPT_COT)
 from langchain_core.messages import HumanMessage, AIMessage
+import re
 
 chat_history = [] # простейшее хранилище 
 
@@ -69,16 +70,54 @@ async def ask_expert(request: QuestionRequest):
     idx = STRICT_ORDER.index(target_tag)
     allowed_sets = [f"{t} set" for t in STRICT_ORDER[:idx+1]]
 
+
+    # Автоматически находим нужные файлы по фамилиям в вопросе
+    matched_sources = get_automatic_filters(request.question)
+    
+    base_filter = {"category_set": {"$in": allowed_sets}}
+    
+    if matched_sources:
+        # ПРОВЕРКА: Если источников несколько, используем $or внутри $and
+        # Но сначала убедись, что matched_sources - это список полных имен из UNIQUE_SOURCES
+        source_filters = [{"source": {"$eq": s}} for s in matched_sources]
+        
+        chroma_filter = {
+            "$and": [
+                {"category_set": {"$in": allowed_sets}},
+                {"$or": source_filters}
+            ]
+        }
+        print(f"🎯 Surgical Strike on: {matched_sources}")
+    else:
+        chroma_filter = {"category_set": {"$in": allowed_sets}}
+
+
+    print(f"DEBUG: Final Filter: {chroma_filter}")
+
     start_search = time.time()
     # Поиск контекста
     docs = db.similarity_search(
         request.question, 
-        k=7, # увеличил чтобы попало больше книжек для сравнения
-        filter={"category_set": {"$in": allowed_sets}}
+        k=10, # увеличил чтобы попало больше книжек для сравнения
+        filter=chroma_filter
     )
     search_duration = time.time() - start_search
+    print(f"DEBUG: Found {len(docs)} chunks from DB.")
+    if len(docs) > 0:
+        print(f"DEBUG: Sample source from first chunk: {docs[0].metadata['source']}")
 
-    context = "\n\n".join([d.page_content for d in docs])
+
+    # context = "\n\n".join([d.page_content for d in docs])
+    # именованный контекст
+    context_parts = []
+    for d in docs:
+        source_name = d.metadata.get('source', 'Unknown')
+        # Добавляем имя источника перед каждым чанком
+        content = f"--- ИСТОЧНИК: {source_name} ---\n{d.page_content}"
+        context_parts.append(content)
+    
+    context = "\n\n".join(context_parts)
+
     sources = list(set([f"{d.metadata.get('source')} [{d.metadata.get('category_set')}]" for d in docs]))
     
     # 2. Формируем историю для Llama-3
@@ -160,3 +199,60 @@ async def clear_memory():
     global chat_history
     chat_history = []
     return {"status": "Memory cleared"}
+
+
+# Глобальный список всех файлов в базе
+UNIQUE_SOURCES = []
+
+@app.on_event("startup")
+async def startup_event():
+    global UNIQUE_SOURCES
+    try:
+        print("🔍 Scanning ChromaDB for unique sources...")
+        all_sources = set()
+        
+        # 1. Get the total count of items in the DB
+        total_count = db._collection.count()
+        batch_size = 1000 # SQLite friendly size
+        
+        # 2. Fetch metadata in batches to avoid "too many variables" error
+        for i in range(0, total_count, batch_size):
+            data = db.get(
+                include=['metadatas'],
+                limit=batch_size,
+                offset=i
+            )
+            if data and data['metadatas']:
+                batch_sources = [m.get('source') for m in data['metadatas'] if m]
+                all_sources.update(batch_sources)
+        
+        UNIQUE_SOURCES = list(all_sources)
+        print(f"✅ Indexed {len(UNIQUE_SOURCES)} unique books/sources from {total_count} chunks.")
+        
+    except Exception as e:
+        print(f"❌ Error during source scan: {e}")
+
+
+import re
+
+def get_automatic_filters(user_query: str):
+    query_lower = user_query.lower()
+    
+    # We use a set to avoid duplicates
+    matched = set()
+    
+    for source in UNIQUE_SOURCES:
+        # 1. Clean the filename: "Prompt Engineering - John Berryman.epub" -> "john berryman"
+        # We remove extensions and common separator characters
+        clean_name = re.sub(r'\.(epub|pdf|pdf_txt)$', '', source, flags=re.IGNORECASE)
+        name_parts = re.split(r'[-_\s\.]', clean_name.lower())
+        
+        # 2. Check for specific keywords (Surnames/Unique words)
+        # We ignore short common words like 'the', 'and', 'with'
+        for part in name_parts:
+            if len(part) > 4 and part in query_lower:
+                matched.add(source)
+                break # Move to next book once we find one match
+                
+    return list(matched)
+
