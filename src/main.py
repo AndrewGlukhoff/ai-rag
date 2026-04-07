@@ -31,7 +31,16 @@ app.add_middleware(
 # 1. Инициализация (делаем один раз при старте сервера)
 embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
 db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
+
+LLM_CONFIG.update({
+    "temperature": 0.1,
+    # Оставляем только английские маркеры, чтобы не путать русский поиск
+    "stop": ["Summary:", "Resumen:", "Translation:", "Assistant:"] 
+})
+
 llm = OllamaLLM(**LLM_CONFIG)
+
+
 # llm = OllamaLLM(
 #     model="llama3",
 #     model_kwargs={
@@ -103,11 +112,30 @@ async def ask_expert(request: QuestionRequest):
 
 
     start_search = time.time()
+    # surgical strike authors
     docs = db.similarity_search(
         request.question, 
         k=7, # увеличил чтобы попало больше книжек для сравнения
         filter=chroma_filter
     )
+
+    # доп/поиск на случай вдруг мы залипли на конкретном авторе из пред/контекста
+    global_docs = db.similarity_search(
+        request.question,
+        k=4,
+        filter=base_filter
+    )
+
+    all_docs = docs + global_docs
+    # take unique only
+    seen_content = set()
+    unique_docs = []
+    for d in all_docs:
+        if d.page_content not in seen_content:
+            unique_docs.append(d)
+            seen_content.add(d.page_content)
+    docs = unique_docs[:10] # take 10
+
     search_duration = time.time() - start_search
     print(f"DEBUG: Found {len(docs)} chunks from DB.")
     if len(docs) > 0:
@@ -140,29 +168,13 @@ async def ask_expert(request: QuestionRequest):
 
     # Choose the prompt based on the checkbox
     instruction = RAG_PROMPT_COT if request.deep_think else RAG_PROMPT_BASIC
-    
-#     prompt = f"""
-#     SYSTEM: Ты — РУССКОЯЗЫЧНЫЙ ИССЛЕДОВАТЕЛЬ ИИ. Твой единственный источник — предоставленный КОНТЕКСТ. 
-#     ЗАПРЕЩЕНО ИСПОЛЬЗОВАТЬ АНГЛИЙСКИЙ ЯЗЫК ДЛЯ РАССУЖДЕНИЙ.
-
-#     ИСТОРИЯ ДИАЛОГА:
-#     {formatted_history}
-
-#     КОНТЕКСТ ИЗ КНИГ:
-#     {context}
-   
-#     ЗАДАЧА: 
-#     {instruction}
-
-#     ВОПРОС: {request.question}
-
-#     ОБЯЗАТЕЛЬНО НАЧНИ С ТЕГА <thought> И ПИШИ ТОЛЬКО ПО-РУССКИ:
-# """
-    # if request.deep_think:
-    #     prompt += "<thought>"
-
-    messages = [SystemMessage(content=f"{instruction}\nОТВЕЧАЙ ТОЛЬКО НА РУССКОМ.")]
-    
+    system_instruction = f"""
+    Ты — технический эксперт. {instruction} 
+    ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ. 
+    ЗАПРЕЩЕНО ДУБЛИРОВАТЬ ОТВЕТ НА АНГЛИЙСКОМ. 
+    ПИШИ СРАЗУ ПО-РУССКИ.
+    """
+    messages = [SystemMessage(content=system_instruction)]
     messages.extend(chat_history[-6:])
     
     current_user_content = f"КОНТЕКСТ ИЗ КНИГ:\n{context}\n\nВОПРОС: {request.question}"
