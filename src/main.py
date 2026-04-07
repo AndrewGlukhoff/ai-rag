@@ -80,30 +80,25 @@ async def ask_expert(request: QuestionRequest):
     target_tag = request.level.replace(" set", "")
     idx = STRICT_ORDER.index(target_tag)
     allowed_sets = [f"{t} set" for t in STRICT_ORDER[:idx+1]]
-
-
-    # Автоматически находим нужные файлы по фамилиям в вопросе
-    matched_sources = get_automatic_filters(request.question, chat_history)
-    
     base_filter = {"category_set": {"$in": allowed_sets}}
-    
-    if matched_sources:
-        print(f"🎯 SURGICAL STRIKE: Найдено совпадений: {len(matched_sources)}")
-        print(f"📋 Источники: {matched_sources}")
 
-        source_filters = [{"source": {"$eq": s}} for s in matched_sources]
-        if len(source_filters) == 1:
+    detected_authors = get_automatic_filters(request.question, chat_history)
+    if detected_authors:
+        print(f"🎯 SURGICAL STRIKE: Фильтр по авторам: {detected_authors}")
+        # filter
+        author_exprs = [{"author": {"$eq": s}} for s in detected_authors]
+        if len(author_exprs) == 1:
             chroma_filter = {
                 "$and": [
                     base_filter,
-                    source_filters[0] # Use the single expression directly
+                    author_exprs[0] # Use the single expression directly
                 ]
             }
         else: 
             chroma_filter = {
                 "$and": [
                     base_filter,
-                    {"$or": source_filters}
+                    {"$or": author_exprs}
                 ]
             }
     else:
@@ -141,30 +136,23 @@ async def ask_expert(request: QuestionRequest):
     if len(docs) > 0:
         print(f"DEBUG: Sample source from first chunk: {docs[0].metadata['source']}")
 
-
-    # context = "\n\n".join([d.page_content for d in docs])
-    # именованный контекст
     context_parts = []
     for d in docs:
         source_name = d.metadata.get('source', 'Unknown')
-        # Добавляем имя источника перед каждым чанком
-        content = f"--- ИСТОЧНИК: {source_name} ---\n{d.page_content}"
+        author_name = d.metadata.get('author', 'Unknown')
+        book_lang = d.metadata.get('lang', 'eng')
+
+        # Добавляем перед каждым чанком
+        header = f"--- ИСТОЧНИК: {source_name} | АВТОР: {author_name} | ЯЗЫК: {book_lang} ---"
+        content = f"{header}\n{d.page_content}"
         context_parts.append(content)
     
     context = "\n\n".join(context_parts)
 
     sources = list(set([f"{d.metadata.get('source')} [{d.metadata.get('category_set')}]" for d in docs]))
     
-    # 2. Формируем историю для Llama-3
     # Берем последние 6 сообщений, чтобы не перегружать контекстное окно (num_ctx)
     history_context = chat_history[-6:]
-
-    # # Обновляем промпт (добавляем блок истории)
-    # formatted_history = ""
-    # for msg in history_context:
-    #     prefix = "User" if isinstance(msg, HumanMessage) else "Assistant"
-    #     formatted_history += f"{prefix}: {msg.content}\n"
-
 
     # Choose the prompt based on the checkbox
     instruction = RAG_PROMPT_COT if request.deep_think else RAG_PROMPT_BASIC
@@ -225,19 +213,19 @@ async def clear_memory():
 
 # Глобальный список всех файлов в базе
 UNIQUE_SOURCES = []
+UNIQUE_AUTHORS = []
 
 @app.on_event("startup")
 async def startup_event():
-    global UNIQUE_SOURCES
+    global UNIQUE_SOURCES, UNIQUE_AUTHORS
     try:
-        print("🔍 Scanning ChromaDB for unique sources...")
+        print("🔍 Синхронизация с ChromaDB...")
         all_sources = set()
+        all_authors = set()
         
-        # 1. Get the total count of items in the DB
         total_count = db._collection.count()
-        batch_size = 1000 # SQLite friendly size
+        batch_size = 1000 
         
-        # 2. Fetch metadata in batches to avoid "too many variables" error
         for i in range(0, total_count, batch_size):
             data = db.get(
                 include=['metadatas'],
@@ -245,11 +233,20 @@ async def startup_event():
                 offset=i
             )
             if data and data['metadatas']:
-                batch_sources = [m.get('source') for m in data['metadatas'] if m]
-                all_sources.update(batch_sources)
+                for m in data['metadatas']:
+                    if m:
+                        if m.get('source'):
+                            all_sources.add(m.get('source'))
+                        author = m.get('author')
+                        if author and author != 'Unknown':
+                            all_authors.add(author)
         
         UNIQUE_SOURCES = list(all_sources)
-        print(f"✅ Indexed {len(UNIQUE_SOURCES)} unique books/sources from {total_count} chunks.")
+        UNIQUE_AUTHORS = list(all_authors)
+        
+        print(f"✅ Синхронизация окончена!")
+        print(f"📚 Книг: {len(UNIQUE_SOURCES)} | ✍️ Авторов: {len(UNIQUE_AUTHORS)}")
+        print(f"🧩 Всего чанков в базе: {total_count}")
         
     except Exception as e:
         print(f"❌ Error during source scan: {e}")
@@ -258,25 +255,28 @@ async def startup_event():
 import re
 
 def get_automatic_filters(user_query: str, history: list):
-    query_lower = user_query.lower()
     print(f"DEBUG: len(history): {len(history)}")
-    for msg in history[-2:]:
-        query_lower += " " + msg.content.lower()
     
-    matched = set()
-    # TODO вместо этого фильтра сделать новый ingest с отдельно authors
-    STOP_WORDS = {"engineering", "machine", "learning", "artificial", "intelligence", "large", "language", "prompt"} 
-    for source in UNIQUE_SOURCES:
-        clean_name = re.sub(r'\.(epub|pdf|pdf_txt)$', '', source, flags=re.IGNORECASE)
-        name_parts = re.split(r'[-_\s\.]', clean_name.lower())
+    search_context = user_query.lower()
+    for msg in history[-2:]:
+        search_context += " " + msg.content.lower()
+
+    # TODO подумать включить транслитерацию
+    
+    matched_authors = set()
+    
+    STOP_WORDS = {} 
+    for author in UNIQUE_AUTHORS:
+        # Разбиваем сложные имена "John Berryman & Albert Ziegler" на части
+        name_parts = re.split(r'[&\s,]', author.lower())
         
         for part in name_parts:
-            # Ищем фамилии (длиной > 4) в вопросе ИЛИ в истории
-            if len(part) > 4 and part in query_lower and part not in STOP_WORDS:
-                print(f"DEBUG: part: {part}, name_parts: {name_parts}")
-                print(f"DEBUG: query_lower: {query_lower}")
-                matched.add(source)
-                break 
+            if len(part) > 4 and part not in STOP_WORDS:
+                if part in search_context:
+                    print(f"DEBUG: part: {part}, name_parts: {name_parts}")
+                    print(f"DEBUG: search_context: {search_context}")
+                    matched_authors.add(author)
+                    break 
                 
-    return list(matched)
+    return list(matched_authors)
 
